@@ -209,7 +209,9 @@ int is_hazard(int instruction_back, int instruction_front) {
     }
     int regA = field0(instruction_front);
     int regB = field1(instruction_front);
-    
+    if(destR == regA && destR == regB) {
+        return 3;
+    }
     if(destR == regA) {
         return 1;
     }
@@ -260,43 +262,51 @@ void EX_stage (stateType* state, stateType* newState) {
     int rega = state->IDEX.readRegA;
     int regb = state->IDEX.readRegB;
     
-    int hazard_no = is_hazard(state->EXMEM.instr, state->IDEX.instr);
-    int hazard_location = 0;
-    
-    if(hazard_no == 0) {
-        hazard_no = is_hazard(state->MEMWB.instr, state->IDEX.instr);
-        hazard_location = 1;
-    }
-    if(hazard_no == 0) {
-        hazard_no = is_hazard(state->WBEND.instr, state->IDEX.instr);
-        hazard_location = 2;
+    int foo[3] = {is_hazard(state->EXMEM.instr, state->IDEX.instr),
+        is_hazard(state->MEMWB.instr, state->IDEX.instr), is_hazard(state->WBEND.instr, state->IDEX.instr)};
+    int reg_a_conflict = false;
+    int reg_b_conflict = false;
+    int reg_a_earliest = 0;
+    int reg_b_earliest = 0;
+    for(int i = 0; i < 3; ++i) {
+        if(foo[i] == 1 && !reg_a_conflict) {
+            reg_a_earliest = i;
+            reg_a_conflict = true;
+        }
+        if(foo[i] == 2 && !reg_b_conflict) {
+            reg_b_earliest = i;
+            reg_b_conflict = true;
+        }
+        if(foo[i] == 3 && !reg_a_conflict) {
+            reg_a_earliest = i;
+            reg_a_conflict = true;
+        }
+        if(foo[i] == 3 && !reg_b_conflict) {
+            reg_b_earliest = i;
+            reg_b_conflict = true;
+        }
     }
     //If there is a hazard
-    if(hazard_no != 0) {
-        //If hazard is from EXMEM
-        if(hazard_location == 0) {
-            if(hazard_no == 1) {
-                rega = state->EXMEM.aluResult;
-            }
-            else if (hazard_no == 2) {
-                regb = state->EXMEM.aluResult;
-            }
+    if(reg_a_conflict) {
+        if(reg_a_earliest == 0) {
+            rega = state->EXMEM.aluResult;
         }
-        else if (hazard_location == 1) {
-            if(hazard_no == 1) {
-                rega = state->MEMWB.writeData;
-            }
-            else if(hazard_no == 2) {
-                regb = state->MEMWB.writeData;
-            }
+        else if(reg_a_earliest == 1) {
+            rega = state->MEMWB.writeData;
         }
-        else if (hazard_location == 2) {
-            if(hazard_no == 1) {
-                rega = state->WBEND.writeData;
-            }
-            else if (hazard_no == 2) {
-                regb = state->WBEND.writeData;
-            }
+        else if(reg_a_earliest == 2) {
+            rega = state->WBEND.writeData;
+        }
+    }
+    if(reg_b_conflict) {
+        if(reg_b_earliest == 0) {
+            regb = state->EXMEM.aluResult;
+        }
+        else if(reg_b_earliest == 1) {
+            regb = state->MEMWB.writeData;
+        }
+        else if(reg_b_earliest == 2) {
+            regb = state->WBEND.writeData;
         }
     }
 
@@ -312,11 +322,15 @@ void EX_stage (stateType* state, stateType* newState) {
         newState->EXMEM.aluResult = rega + state->IDEX.offset;
     }
     else if (op == BEQ) {
-        newState->EXMEM.aluResult = regb + state->IDEX.offset;
         if(rega == regb) {
-            newState->pc = newState->EXMEM.branchTarget;
+            newState->EXMEM.aluResult = 1;
         }
+        else {
+            newState->EXMEM.aluResult = 1;
+        }
+        
     }
+    newState->EXMEM.readRegB = regb;
 }
 void MEM_stage (stateType* state, stateType* newState) {
     newState->MEMWB.instr = state->EXMEM.instr;
@@ -329,7 +343,12 @@ void MEM_stage (stateType* state, stateType* newState) {
         newState->dataMem[state->EXMEM.aluResult] = state->EXMEM.readRegB;
     }
     else if (op == BEQ) {
-        //TODO: Check BRANCH
+        if(state->EXMEM.aluResult == 1) {
+            newState->pc = state->EXMEM.branchTarget;
+            newState->EXMEM.instr = NOOPINSTRUCTION;
+            newState->IDEX.instr = NOOPINSTRUCTION;
+            newState->IFID.instr = NOOPINSTRUCTION;
+        }
     }
 
 }
