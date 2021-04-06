@@ -40,8 +40,7 @@ typedef struct IDEXStruct {
 	int readRegA;
 	int readRegB;
 	int offset;
-    int forward_value;
-    enum error_enum{none, lw, regA, regB}error;
+    enum error_enum{none, lw}error;
 } IDEXType;
 
 typedef struct EXMEMStruct {
@@ -220,6 +219,7 @@ int is_hazard(int instruction_back, int instruction_front) {
     return 0;
     
 }
+
 void IF_stage(stateType* state, stateType* newState) {
     if(state->IDEX.error == lw) {
         return;
@@ -235,13 +235,14 @@ void ID_stage(stateType* state, stateType* newState) {
     newState->IDEX.pcPlus1 = state->IFID.pcPlus1;
     
     //Set error bit
-    if((is_hazard(newState->IDEX.instr, newState->IFID.instr) != 0) && (opcode(newState->IDEX.instr) == LW)) {
+    if(is_hazard(newState->IDEX.instr, newState->IFID.instr) != 0 && opcode(newState->IDEX.instr) == LW) {
         newState->IDEX.error = lw;
     }
     //Handle lw stall
     if(state->IDEX.error == lw) {
-        newState->IDEX.instr = NOOP;
+        newState->IDEX.instr = NOOPINSTRUCTION;
         newState->IDEX.error = none;
+        return;
     }
     
     int regA = field0(newState->IDEX.instr);
@@ -256,19 +257,49 @@ void EX_stage (stateType* state, stateType* newState) {
     newState->EXMEM.instr = state->IDEX.instr;
     newState->EXMEM.branchTarget = state->IDEX.offset + state->IDEX.pcPlus1;
     
-    
     int rega = state->IDEX.readRegA;
     int regb = state->IDEX.readRegB;
     
-    if(state->IDEX.error == regA) {
-        rega = state->IDEX.forward_value;
-        newState->IDEX.error = none;
+    int hazard_no = is_hazard(state->EXMEM.instr, state->IDEX.instr);
+    int hazard_location = 0;
+    
+    if(hazard_no == 0) {
+        hazard_no = is_hazard(state->MEMWB.instr, state->IDEX.instr);
+        hazard_location = 1;
     }
-    if(state->IDEX.error == regB) {
-        regb = state->IDEX.forward_value;
-        newState->IDEX.error = none;
+    if(hazard_no == 0) {
+        hazard_no = is_hazard(state->WBEND.instr, state->IDEX.instr);
+        hazard_location = 2;
     }
-    newState->EXMEM.readRegB = regB;
+    //If there is a hazard
+    if(hazard_no != 0) {
+        //If hazard is from EXMEM
+        if(hazard_location == 0) {
+            if(hazard_no == 1) {
+                rega = state->EXMEM.aluResult;
+            }
+            else if (hazard_no == 2) {
+                regb = state->EXMEM.aluResult;
+            }
+        }
+        else if (hazard_location == 1) {
+            if(hazard_no == 1) {
+                rega = state->MEMWB.writeData;
+            }
+            else if(hazard_no == 2) {
+                regb = state->MEMWB.writeData;
+            }
+        }
+        else if (hazard_location == 2) {
+            if(hazard_no == 1) {
+                rega = state->WBEND.writeData;
+            }
+            else if (hazard_no == 2) {
+                regb = state->WBEND.writeData;
+            }
+        }
+    }
+
     int op = opcode(newState->EXMEM.instr);
     if(op == ADD) {
         newState->EXMEM.aluResult = rega + regb;
@@ -286,19 +317,10 @@ void EX_stage (stateType* state, stateType* newState) {
             newState->pc = newState->EXMEM.branchTarget;
         }
     }
-    //Forward value to proper spot
-    int hazard_value = is_hazard(newState->EXMEM.instr, newState->IDEX.instr);
-    if(hazard_value == 1) {
-        newState->IDEX.error = regA;
-        newState->IDEX.forward_value = newState->EXMEM.aluResult;
-    }
-    else if(hazard_value == 2) {
-        newState->IDEX.error = regB;
-        newState->IDEX.forward_value = newState->EXMEM.aluResult;
-    }
 }
 void MEM_stage (stateType* state, stateType* newState) {
     newState->MEMWB.instr = state->EXMEM.instr;
+    newState->MEMWB.writeData = state->EXMEM.aluResult;
     int op = opcode(newState->MEMWB.instr);
     if (op == LW) {
         newState->MEMWB.writeData = state->dataMem[state->EXMEM.aluResult];
@@ -308,16 +330,6 @@ void MEM_stage (stateType* state, stateType* newState) {
     }
     else if (op == BEQ) {
         //TODO: Check BRANCH
-    }
-    //Forward value to proper spot
-    int hazard_value = is_hazard(newState->MEMWB.instr, newState->IDEX.instr);
-    if(hazard_value == 1 && newState->IDEX.error == none) {
-        newState->IDEX.error = regA;
-        newState->IDEX.forward_value = newState->MEMWB.writeData;
-    }
-    else if(hazard_value == 2 && newState->IDEX.error == none) {
-        newState->IDEX.error = regB;
-        newState->IDEX.forward_value = newState->MEMWB.writeData;
     }
 
 }
