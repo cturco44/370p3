@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 #define NUMMEMORY 65536 /* maximum number of data words in memory */
 #define NUMREGS 8 /* number of machine registers */
@@ -39,6 +40,8 @@ typedef struct IDEXStruct {
 	int readRegA;
 	int readRegB;
 	int offset;
+    int forward_value;
+    enum error_enum{none, lw, regA, regB}error;
 } IDEXType;
 
 typedef struct EXMEMStruct {
@@ -188,16 +191,58 @@ printState(stateType *statePtr)
     printf("\t\twriteData %d\n", statePtr->WBEND.writeData);
 }
 
-
+int is_hazard(int instruction_back, int instruction_front) {
+    int op = opcode(instruction_back);
+    int front_op = opcode(instruction_front);
+    
+    if(op != ADD && op!= NOR && op != LW) {
+        return 0;
+    }
+    if(front_op == HALT || front_op == JALR || front_op == NOOP) {
+        return 0;
+    }
+    int destR = -1;
+    if (op == ADD || op == NOR) {
+        destR = field2(instruction_back);
+    }
+    else if (op == LW) {
+        destR = field1(instruction_back);
+    }
+    int regA = field0(instruction_front);
+    int regB = field1(instruction_front);
+    
+    if(destR == regA) {
+        return 1;
+    }
+    if(destR == regB) {
+        return 2;
+    }
+    return 0;
+    
+}
 void IF_stage(stateType* state, stateType* newState) {
+    if(state->IDEX.error == lw) {
+        return;
+    }
     newState->IFID.instr  = state->instrMem[state->pc];
     newState->IFID.pcPlus1 = state->pc + 1;
     ++newState->pc;
     
 }
 void ID_stage(stateType* state, stateType* newState) {
+    
     newState->IDEX.instr = state->IFID.instr;
     newState->IDEX.pcPlus1 = state->IFID.pcPlus1;
+    
+    //Set error bit
+    if(is_hazard(newState->IDEX.instr, newState->IFID.instr) == 0) {
+        newState->IDEX.error = lw;
+    }
+    //Handle lw stall
+    if(state->IDEX.error == lw) {
+        newState->IDEX.instr = NOOP;
+        newState->IDEX.error = none;
+    }
     
     int regA = field0(newState->IDEX.instr);
     int regB = field1(newState->IDEX.instr);
@@ -210,24 +255,46 @@ void ID_stage(stateType* state, stateType* newState) {
 void EX_stage (stateType* state, stateType* newState) {
     newState->EXMEM.instr = state->IDEX.instr;
     newState->EXMEM.branchTarget = state->IDEX.offset + state->IDEX.pcPlus1;
-    newState->EXMEM.readRegB = state->IDEX.readRegB;
     
+    
+    int regA = state->IDEX.readRegA;
+    int regB = state->IDEX.readRegB;
+    
+    if(state->IDEX.error == regA) {
+        regA = state->IDEX.forward_value;
+        state->IDEX.error = none;
+    }
+    if(state->IDEX.error == regB) {
+        regB = state->IDEX.forward_value;
+        state->IDEX.error = none;
+    }
+    newState->EXMEM.readRegB = regB;
     int op = opcode(newState->EXMEM.instr);
     if(op == ADD) {
-        newState->EXMEM.aluResult = state->IDEX.readRegA + state->IDEX.readRegA;
+        newState->EXMEM.aluResult = regA + regB;
         
     }
     else if (op == NOR) {
-        newState->EXMEM.aluResult = ~(state->IDEX.readRegA | state->IDEX.readRegA);
+        newState->EXMEM.aluResult = ~(regA | regB);
     }
     else if (op == LW || op == SW) {
-        newState->EXMEM.aluResult = state->IDEX.readRegA + state->IDEX.offset;
+        newState->EXMEM.aluResult = regA + state->IDEX.offset;
     }
     else if (op == BEQ) {
-        newState->EXMEM.aluResult = state->IDEX.readRegB + state->IDEX.offset;
-        if(state->IDEX.readRegA == state->IDEX.readRegB) {
+        newState->EXMEM.aluResult = regB + state->IDEX.offset;
+        if(regA == regB) {
             newState->pc = newState->EXMEM.branchTarget;
         }
+    }
+    //Forward value to proper spot
+    int hazard_value = is_hazard(newState->EXMEM.instr, newState->IDEX.instr);
+    if(hazard_value == 1) {
+        newState->IDEX.error = regA;
+        newState->IDEX.forward_value = newState->EXMEM.aluResult;
+    }
+    else if(hazard_value == 2) {
+        newState->IDEX.error = regB;
+        newState->IDEX.forward_value = newState->EXMEM.aluResult;
     }
 }
 void MEM_stage (stateType* state, stateType* newState) {
@@ -241,6 +308,16 @@ void MEM_stage (stateType* state, stateType* newState) {
     }
     else if (op == BEQ) {
         //TODO: Check BRANCH
+    }
+    //Forward value to proper spot
+    int hazard_value = is_hazard(newState->MEMWB.instr, newState->IDEX.instr);
+    if(hazard_value == 1) {
+        newState->IDEX.error = regA;
+        newState->IDEX.forward_value = newState->MEMWB.writeData;
+    }
+    else if(hazard_value == 2) {
+        newState->IDEX.error = regB;
+        newState->IDEX.forward_value = newState->MEMWB.writeData;
     }
 
 }
@@ -343,6 +420,7 @@ int main(int argc, char *argv[]) {
     state.cycles = 0;
     state.IFID.instr = NOOPINSTRUCTION;
     state.IDEX.instr = NOOPINSTRUCTION;
+    state.IDEX.error = none;
     state.EXMEM.instr = NOOPINSTRUCTION;
     state.MEMWB.instr = NOOPINSTRUCTION;
     state.WBEND.instr = NOOPINSTRUCTION;
